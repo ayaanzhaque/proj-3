@@ -70,6 +70,7 @@ def canonicalize_url(url: str) -> str | None:
 
 def enumerate_wordpress_urls(session: requests.Session) -> list[dict[str, str]]:
     discovered: list[dict[str, str]] = []
+    pbar = tqdm(desc="wordpress", unit="url")
     for endpoint in WORDPRESS_TYPES:
         page = 1
         while True:
@@ -93,10 +94,12 @@ def enumerate_wordpress_urls(session: requests.Session) -> list[dict[str, str]]:
                         "updated_at": row.get("modified_gmt") or row.get("modified"),
                     }
                 )
+                pbar.update(1)
             total_pages = int(response.headers.get("X-WP-TotalPages", "1"))
             if page >= total_pages:
                 break
             page += 1
+    pbar.close()
     return discovered
 
 
@@ -111,6 +114,7 @@ def spider_domain(
     seen: set[str] = set()
     discovered: list[dict[str, str]] = []
     queue: deque[tuple[str, int]] = deque((seed, 0) for seed in seeds)
+    pbar = tqdm(desc=source_type, unit="url")
     while queue:
         if len(discovered) >= max_urls:
             break
@@ -120,6 +124,7 @@ def spider_domain(
             continue
         seen.add(url)
         discovered.append({"url": url, "source_type": source_type, "updated_at": None})
+        pbar.update(1)
         if level >= depth:
             continue
         response = _fetch_with_backoff(session, url)
@@ -135,6 +140,7 @@ def spider_domain(
             if len(seen) + len(queue) >= max_urls:
                 continue
             queue.append((child, level + 1))
+    pbar.close()
     return discovered
 
 
@@ -144,6 +150,7 @@ def enumerate_www2_urls(
     seen: set[str] = set()
     discovered: list[dict[str, str]] = []
     queue: deque[tuple[str, int]] = deque((seed, 0) for seed in WWW2_SEEDS)
+    pbar = tqdm(desc="www2", unit="url")
     while queue:
         if len(discovered) >= max_urls:
             break
@@ -153,6 +160,7 @@ def enumerate_www2_urls(
             continue
         seen.add(url)
         discovered.append({"url": url, "source_type": "legacy_html", "updated_at": None})
+        pbar.update(1)
         if level >= depth:
             continue
         response = _fetch_with_backoff(session, url)
@@ -168,6 +176,7 @@ def enumerate_www2_urls(
             if len(seen) + len(queue) >= max_urls:
                 continue
             queue.append((child, level + 1))
+    pbar.close()
     return discovered
 
 
@@ -418,16 +427,10 @@ def main() -> int:
 
     CORPUS_DIR.mkdir(parents=True, exist_ok=True)
     session = build_session()
-    print("Enumerating WordPress URLs...", flush=True)
     wordpress_rows = enumerate_wordpress_urls(session)
-    print(f"Discovered {len(wordpress_rows)} WordPress URLs", flush=True)
-    print("Spidering main domain...", flush=True)
     main_spider_seeds = [f"https://{MAIN_DOMAIN}/"]
     main_spider_rows = spider_domain(session, main_spider_seeds, source_type="main_spider")
-    print(f"Discovered {len(main_spider_rows)} main-domain spider URLs", flush=True)
-    print("Enumerating legacy www2 URLs...", flush=True)
     legacy_rows = enumerate_www2_urls(session)
-    print(f"Discovered {len(legacy_rows)} legacy URLs", flush=True)
     merged: dict[str, dict[str, str]] = {}
     for row in wordpress_rows + main_spider_rows + legacy_rows:
         merged.setdefault(row["url"], row)
