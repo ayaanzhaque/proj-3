@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 import re
-from typing import Iterable
 
 import numpy as np
 import torch
@@ -15,18 +15,18 @@ from project.constants import (
     DEFAULT_MIN_CHUNK_SCORE,
     DEFAULT_MIN_PAGE_SCORE,
     DEFAULT_NULL_MARGIN,
-    DENSE_ENCODER_DIR,
-    MAX_ANSWER_TOKENS,
+    LLM_MAX_TOKENS,
+    LLM_MODEL,
+    LLM_SYSTEM_PROMPT,
+    LLM_TEMPERATURE,
+    LLM_TIMEOUT,
     MAX_ANSWER_WORDS,
-    MAX_CONTEXT_LENGTH,
-    MAX_QA_BATCH,
-    PAGE_EMBEDDINGS_PATH,
+    MAX_CONTEXT_CHARS,
+    MAX_CONTEXT_CHUNKS,
     PAGE_TOP_K,
-    QA_MODEL_DIR,
-    RUNTIME_CONFIG_PATH,
 )
 from project.io_utils import read_json, read_jsonl
-from project.modeling import DenseEncoder, QAModel
+from project.modeling import DenseEncoder
 from project.text_utils import (
     is_yes_no_question,
     lexical_overlap,
@@ -37,6 +37,8 @@ from project.text_utils import (
     truncate_answer_words,
     url_tokens,
 )
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -87,7 +89,6 @@ class RetrievalRuntime:
         self.chunk_bm25 = BM25Okapi(self.chunk_tokens)
 
         self.dense_encoder = DenseEncoder(self.root / "artifacts" / "models" / "dense_encoder")
-        self.qa_model = QAModel(self.root / "artifacts" / "models" / "qa_model")
 
     def _retrieve_for_question(
         self,
@@ -168,143 +169,75 @@ class RetrievalRuntime:
         ]
 
     def answer_many(self, questions: list[str], retrieved_chunks: list[list[dict]]) -> list[str]:
-        direct_answers: list[str | None] = [None] * len(questions)
-        pair_questions: list[str] = []
-        pair_contexts: list[str] = []
-        pair_meta: list[tuple[int, int]] = []
-        for question_idx, (question, chunks) in enumerate(zip(questions, retrieved_chunks)):
-            direct_answer = try_rule_based_answer(question, chunks)
-            if direct_answer is not None:
-                direct_answers[question_idx] = direct_answer
+        from llm import call_llm
+
+        answers: list[str] = []
+        for question, chunks in zip(questions, retrieved_chunks):
+            rule_answer = try_rule_based_answer(question, chunks)
+            if rule_answer is not None:
+                answers.append(rule_answer)
                 continue
-            for chunk_idx, chunk in enumerate(chunks):
-                pair_questions.append(questions[question_idx])
-                pair_contexts.append(chunk["text"])
-                pair_meta.append((question_idx, chunk_idx))
+            answers.append(self._llm_answer(call_llm, question, chunks))
+        return answers
 
-        if not pair_questions:
-            return [answer or "UNKNOWN" for answer in direct_answers]
+    def _llm_answer(self, call_llm, question: str, chunks: list[dict]) -> str:
+        context = build_context(chunks, MAX_CONTEXT_CHUNKS, MAX_CONTEXT_CHARS)
+        if not context:
+            return "UNKNOWN"
 
-        tokenizer = self.qa_model.tokenizer
-        model = self.qa_model.model
-        answers_by_question: list[list[tuple[float, str]]] = [[] for _ in questions]
-
-        for start in range(0, len(pair_questions), MAX_QA_BATCH):
-            batch_questions = pair_questions[start : start + MAX_QA_BATCH]
-            batch_contexts = pair_contexts[start : start + MAX_QA_BATCH]
-            batch_meta = pair_meta[start : start + MAX_QA_BATCH]
-            encoded = tokenizer(
-                batch_questions,
-                batch_contexts,
-                padding=True,
-                truncation="only_second",
-                max_length=MAX_CONTEXT_LENGTH,
-                return_offsets_mapping=True,
-                return_tensors="pt",
+        query = f"Context:\n{context}\n\nQuestion: {question}\nAnswer:"
+        try:
+            raw = call_llm(
+                query=query,
+                system_prompt=LLM_SYSTEM_PROMPT,
+                model=LLM_MODEL,
+                max_tokens=LLM_MAX_TOKENS,
+                temperature=LLM_TEMPERATURE,
+                timeout=LLM_TIMEOUT,
             )
-            sequence_ids = [encoded.sequence_ids(i) for i in range(len(batch_questions))]
-            offset_mapping = encoded.pop("offset_mapping")
-            encoded = {key: value.to(model.device) for key, value in encoded.items()}
-            with torch.no_grad():
-                outputs = model(**encoded)
-            start_logits = outputs.start_logits.cpu().numpy()
-            end_logits = outputs.end_logits.cpu().numpy()
+        except Exception as exc:
+            log.warning("LLM call failed for question %r: %s", question, exc)
+            return "UNKNOWN"
 
-            for row_idx, (question_idx, chunk_idx) in enumerate(batch_meta):
-                chunk = retrieved_chunks[question_idx][chunk_idx]
-                answer, score = extract_best_span(
-                    tokenizer=tokenizer,
-                    offsets=offset_mapping[row_idx].tolist(),
-                    sequence_ids=sequence_ids[row_idx],
-                    start_logits=start_logits[row_idx],
-                    end_logits=end_logits[row_idx],
-                    context=batch_contexts[row_idx],
-                    retrieval_score=float(chunk["retrieval_score"]),
-                )
-                answers_by_question[question_idx].append((score, answer))
-
-        final_answers: list[str] = []
-        for question_idx, question in enumerate(questions):
-            if direct_answers[question_idx] is not None:
-                final_answers.append(direct_answers[question_idx] or "UNKNOWN")
-                continue
-            final_answers.append(
-                select_final_answer(
-                    question=question,
-                    candidates=answers_by_question[question_idx],
-                    config=self.config,
-                )
-            )
-        return final_answers
+        return clean_llm_answer(question, raw)
 
 
-def extract_best_span(
-    *,
-    tokenizer,
-    offsets: list[list[int]],
-    sequence_ids: list[int | None],
-    start_logits: np.ndarray,
-    end_logits: np.ndarray,
-    context: str,
-    retrieval_score: float,
-) -> tuple[str, float]:
-    cls_index = 0
-    null_score = float(start_logits[cls_index] + end_logits[cls_index])
-    best_text = ""
-    best_score = -1e9
-
-    start_candidates = np.argsort(start_logits)[-12:][::-1]
-    end_candidates = np.argsort(end_logits)[-12:][::-1]
-
-    for start_idx in start_candidates:
-        for end_idx in end_candidates:
-            if end_idx < start_idx:
-                continue
-            if end_idx - start_idx + 1 > MAX_ANSWER_TOKENS:
-                continue
-            if sequence_ids[start_idx] != 1 or sequence_ids[end_idx] != 1:
-                continue
-            if offsets[start_idx] == [0, 0] or offsets[end_idx] == [0, 0]:
-                continue
-            start_char = offsets[start_idx][0]
-            end_char = offsets[end_idx][1]
-            if end_char <= start_char:
-                continue
-            text = squash_ws(context[start_char:end_char])
-            if not text:
-                continue
-            margin = float(start_logits[start_idx] + end_logits[end_idx] - null_score)
-            score = margin + 0.2 * retrieval_score
-            if score > best_score:
-                best_text = text
-                best_score = score
-
-    return best_text, best_score
+def build_context(chunks: list[dict], max_chunks: int, max_chars: int) -> str:
+    parts: list[str] = []
+    total = 0
+    for chunk in chunks[:max_chunks]:
+        header = chunk.get("title", "")
+        heading = chunk.get("heading", "")
+        text = chunk.get("text", "")
+        snippet = squash_ws(" | ".join(filter(None, [header, heading, text])))
+        if total + len(snippet) > max_chars and parts:
+            break
+        parts.append(snippet)
+        total += len(snippet)
+    return "\n\n".join(parts)
 
 
-def select_final_answer(
-    *,
-    question: str,
-    candidates: Iterable[tuple[float, str]],
-    config: RuntimeConfig,
-) -> str:
-    candidates = sorted(candidates, key=lambda item: item[0], reverse=True)
-    if not candidates:
-        return "UNKNOWN"
-    score, answer = candidates[0]
+def clean_llm_answer(question: str, raw: str) -> str:
+    answer = raw.strip().strip('"\'').strip()
+    # Remove common LLM preamble patterns
+    for prefix in ("Answer:", "The answer is", "Based on the context,", "According to the context,"):
+        if answer.lower().startswith(prefix.lower()):
+            answer = answer[len(prefix):].strip().strip(":").strip()
+
+    answer = answer.split("\n")[0].strip()
     answer = truncate_answer_words(answer, MAX_ANSWER_WORDS).strip(" ,;:.")
-    if not answer or score < config.null_margin:
-        return "UNKNOWN"
-    if " at " in answer and re.search(r"\b(role|title)\b", question, re.IGNORECASE):
-        answer = answer.split(" at ", 1)[0].strip()
+
     if is_yes_no_question(question):
         lowered = answer.lower()
-        if lowered.startswith("yes"):
+        if "yes" in lowered:
             return "Yes"
-        if lowered.startswith("no"):
+        if "no" in lowered:
             return "No"
+        return answer or "UNKNOWN"
+
+    if not answer or answer.upper() == "UNKNOWN":
         return "UNKNOWN"
-    return answer or "UNKNOWN"
+    return answer
 
 
 def parse_kv_row(text: str) -> dict[str, str]:

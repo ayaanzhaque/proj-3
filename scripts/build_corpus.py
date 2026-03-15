@@ -6,6 +6,7 @@ import hashlib
 import sys
 import time
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
 from dataclasses import asdict
 from pathlib import Path
@@ -21,6 +22,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from project.constants import (
+    ALLOWED_DOMAINS,
     BLOCK_TAGS,
     CHUNK_OVERLAP,
     CHUNK_WORDS,
@@ -98,18 +100,46 @@ def enumerate_wordpress_urls(session: requests.Session) -> list[dict[str, str]]:
     return discovered
 
 
-LEGACY_PREFIXES = (
-    "/Directories/",
-    "/Courses/",
-    "/Research/Areas/",
-    "/Pubs/",
-    "/Faculty/",
-    "/deptinfo",
-)
+def spider_domain(
+    session: requests.Session,
+    seeds: list[str],
+    source_type: str = "spider",
+    depth: int = 3,
+    max_urls: int = 3000,
+) -> list[dict[str, str]]:
+    """General-purpose spider that follows all links within ALLOWED_DOMAINS."""
+    seen: set[str] = set()
+    discovered: list[dict[str, str]] = []
+    queue: deque[tuple[str, int]] = deque((seed, 0) for seed in seeds)
+    while queue:
+        if len(discovered) >= max_urls:
+            break
+        url, level = queue.popleft()
+        url = canonicalize_url(url) or url
+        if url in seen:
+            continue
+        seen.add(url)
+        discovered.append({"url": url, "source_type": source_type, "updated_at": None})
+        if level >= depth:
+            continue
+        response = _fetch_with_backoff(session, url)
+        if response is None:
+            continue
+        soup = BeautifulSoup(response.text, "html.parser")
+        for anchor in soup.find_all("a", href=True):
+            child = canonicalize_url(urljoin(url, anchor["href"]))
+            if not child or child in seen:
+                continue
+            if "Protected" in child:
+                continue
+            if len(seen) + len(queue) >= max_urls:
+                continue
+            queue.append((child, level + 1))
+    return discovered
 
 
 def enumerate_www2_urls(
-    session: requests.Session, depth: int = 1, max_urls: int = 400
+    session: requests.Session, depth: int = 3, max_urls: int = 3000
 ) -> list[dict[str, str]]:
     seen: set[str] = set()
     discovered: list[dict[str, str]] = []
@@ -125,10 +155,8 @@ def enumerate_www2_urls(
         discovered.append({"url": url, "source_type": "legacy_html", "updated_at": None})
         if level >= depth:
             continue
-        try:
-            response = session.get(url, timeout=30)
-            response.raise_for_status()
-        except Exception:
+        response = _fetch_with_backoff(session, url)
+        if response is None:
             continue
         soup = BeautifulSoup(response.text, "html.parser")
         for anchor in soup.find_all("a", href=True):
@@ -136,9 +164,6 @@ def enumerate_www2_urls(
             if not child or child in seen:
                 continue
             if "Protected" in child:
-                continue
-            child_path = urlparse(child).path
-            if not child_path.startswith(LEGACY_PREFIXES):
                 continue
             if len(seen) + len(queue) >= max_urls:
                 continue
@@ -315,42 +340,79 @@ def build_chunks(page: PageRecord) -> list[ChunkRecord]:
     return chunks
 
 
-def crawl_pages(url_rows: list[dict[str, str]], delay_seconds: float) -> tuple[list[PageRecord], list[ChunkRecord]]:
-    session = build_session()
-    pages: list[PageRecord] = []
-    chunks: list[ChunkRecord] = []
-    seen: set[str] = set()
-    for row in tqdm(url_rows, desc="crawling", unit="page"):
-        url = row["url"]
-        if url in seen:
-            continue
-        seen.add(url)
+def _fetch_with_backoff(
+    session: requests.Session, url: str, max_retries: int = 5
+) -> requests.Response | None:
+    for attempt in range(max_retries):
         try:
             response = session.get(url, timeout=30)
+            if response.status_code == 429:
+                wait = 2 ** attempt
+                retry_after = response.headers.get("Retry-After")
+                if retry_after and retry_after.isdigit():
+                    wait = max(wait, int(retry_after))
+                print(f"  [429] {url} — retrying in {wait}s (attempt {attempt + 1}/{max_retries})", flush=True)
+                time.sleep(wait)
+                continue
             response.raise_for_status()
-            content_type = response.headers.get("Content-Type", "")
-            if "text/html" not in content_type:
-                continue
-            page = clean_page(
-                url=url,
-                html_text=response.text,
-                source_type=row["source_type"],
-                updated_at=row["updated_at"],
-            )
-            if page is None:
-                continue
-            pages.append(page)
-            chunks.extend(build_chunks(page))
-            if delay_seconds > 0:
-                time.sleep(delay_seconds)
+            return response
+        except requests.exceptions.HTTPError:
+            return None
         except Exception:
-            continue
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)
+                continue
+            return None
+    print(f"  [warn] gave up on {url} after {max_retries} retries", flush=True)
+    return None
+
+
+def _fetch_and_clean(row: dict[str, str], session: requests.Session) -> tuple[PageRecord | None, list[ChunkRecord]]:
+    url = row["url"]
+    response = _fetch_with_backoff(session, url)
+    if response is None:
+        return None, []
+    content_type = response.headers.get("Content-Type", "")
+    if "text/html" not in content_type:
+        return None, []
+    page = clean_page(
+        url=url,
+        html_text=response.text,
+        source_type=row["source_type"],
+        updated_at=row["updated_at"],
+    )
+    if page is None:
+        return None, []
+    return page, build_chunks(page)
+
+
+def crawl_pages(
+    url_rows: list[dict[str, str]], workers: int = 16
+) -> tuple[list[PageRecord], list[ChunkRecord]]:
+    seen: set[str] = set()
+    unique_rows: list[dict[str, str]] = []
+    for row in url_rows:
+        if row["url"] not in seen:
+            seen.add(row["url"])
+            unique_rows.append(row)
+
+    pages: list[PageRecord] = []
+    chunks: list[ChunkRecord] = []
+    session = build_session()
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(_fetch_and_clean, row, session): row for row in unique_rows}
+        for future in tqdm(as_completed(futures), total=len(futures), desc="crawling", unit="page"):
+            page, page_chunks = future.result()
+            if page is not None:
+                pages.append(page)
+                chunks.extend(page_chunks)
     return pages, chunks
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Build the EECS retrieval corpus.")
-    parser.add_argument("--delay-seconds", type=float, default=0.0)
+    parser.add_argument("--workers", type=int, default=16, help="Number of parallel download threads.")
     parser.add_argument("--limit", type=int, default=0)
     args = parser.parse_args()
 
@@ -359,11 +421,15 @@ def main() -> int:
     print("Enumerating WordPress URLs...", flush=True)
     wordpress_rows = enumerate_wordpress_urls(session)
     print(f"Discovered {len(wordpress_rows)} WordPress URLs", flush=True)
+    print("Spidering main domain...", flush=True)
+    main_spider_seeds = [f"https://{MAIN_DOMAIN}/"]
+    main_spider_rows = spider_domain(session, main_spider_seeds, source_type="main_spider")
+    print(f"Discovered {len(main_spider_rows)} main-domain spider URLs", flush=True)
     print("Enumerating legacy www2 URLs...", flush=True)
-    legacy_rows = enumerate_www2_urls(session, depth=1)
+    legacy_rows = enumerate_www2_urls(session)
     print(f"Discovered {len(legacy_rows)} legacy URLs", flush=True)
     merged: dict[str, dict[str, str]] = {}
-    for row in wordpress_rows + legacy_rows:
+    for row in wordpress_rows + main_spider_rows + legacy_rows:
         merged.setdefault(row["url"], row)
     url_rows = list(merged.values())
     url_rows.sort(key=lambda row: row["url"])
@@ -371,7 +437,7 @@ def main() -> int:
         url_rows = url_rows[: args.limit]
     print(f"Crawling {len(url_rows)} URLs", flush=True)
 
-    pages, chunks = crawl_pages(url_rows, delay_seconds=args.delay_seconds)
+    pages, chunks = crawl_pages(url_rows, workers=args.workers)
     print(f"Built {len(pages)} pages and {len(chunks)} chunks", flush=True)
     write_jsonl(PAGES_PATH, (page.to_dict() for page in pages))
     write_jsonl(CHUNKS_PATH, (chunk.to_dict() for chunk in chunks))
