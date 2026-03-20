@@ -15,6 +15,7 @@ import json
 import statistics
 import sys
 import time
+from collections import defaultdict
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -124,6 +125,11 @@ def main() -> int:
     # Build a set of all URLs in the corpus for coverage checks
     corpus_urls = {normalize_url(p["url"]) for p in runtime.pages}
 
+    # Build URL -> list[chunk] index for "answer on page" checks
+    corpus_chunks_by_url: dict[str, list[dict]] = defaultdict(list)
+    for chunk in runtime.chunks:
+        corpus_chunks_by_url[normalize_url(chunk["url"])].append(chunk)
+
     print("Retrieving …")
     t0 = time.perf_counter()
     all_retrieved = runtime.retrieve_many(questions)
@@ -146,6 +152,7 @@ def main() -> int:
     f1_scores: list[float] = []
     url_recalls: list[float] = []
     answer_recalls: list[float] = []
+    answer_on_page_flags: list[float] = []
     in_corpus_flags: list[float] = []
     result_rows: list[dict[str, str]] = []
 
@@ -157,12 +164,16 @@ def main() -> int:
         retrieved_urls = list({c["url"] for c in chunks})
         u_hit = 1.0 if url_hit(urls[idx], retrieved_urls) else 0.0
         a_hit = 1.0 if answer_in_chunks(gold, chunks) else 0.0
-        in_corpus = 1.0 if normalize_url(urls[idx]) in corpus_urls else 0.0
+        gold_norm_url = normalize_url(urls[idx])
+        in_corpus = 1.0 if gold_norm_url in corpus_urls else 0.0
+        page_chunks = corpus_chunks_by_url.get(gold_norm_url, [])
+        a_on_page = 1.0 if answer_in_chunks(gold, page_chunks) else 0.0
 
         em_scores.append(em)
         f1_scores.append(f1)
         url_recalls.append(u_hit)
         answer_recalls.append(a_hit)
+        answer_on_page_flags.append(a_on_page)
         in_corpus_flags.append(in_corpus)
 
         result_rows.append(
@@ -176,6 +187,7 @@ def main() -> int:
                 "url": urls[idx],
                 "in_corpus": f"{in_corpus:.0f}",
                 "url_recall": f"{u_hit:.0f}",
+                "answer_on_page": f"{a_on_page:.0f}",
                 "answer_recall": f"{a_hit:.0f}",
             }
         )
@@ -189,6 +201,7 @@ def main() -> int:
             print(f"       Gold URL : {urls[idx]}")
             print(f"       In corpus: {'YES' if in_corpus else 'NO'}    "
                   f"URL retrieved: {'YES' if u_hit else 'NO'}    "
+                  f"Answer on page: {'YES' if a_on_page else 'NO'}    "
                   f"Answer in chunks: {'YES' if a_hit else 'NO'}")
             if chunks:
                 print(f"       Retrieved {len(chunks)} chunks:")
@@ -207,6 +220,7 @@ def main() -> int:
     mean_em = statistics.mean(em_scores)
     mean_f1 = statistics.mean(f1_scores)
     mean_url_recall = statistics.mean(url_recalls)
+    mean_answer_on_page = statistics.mean(answer_on_page_flags)
     mean_answer_recall = statistics.mean(answer_recalls)
     mean_in_corpus = statistics.mean(in_corpus_flags)
 
@@ -218,6 +232,8 @@ def main() -> int:
           f"({sum(in_corpus_flags):.0f}/{len(in_corpus_flags)})")
     print(f"  URL Recall      : {mean_url_recall:.4f}  "
           f"({sum(url_recalls):.0f}/{len(url_recalls)})")
+    print(f"  Answer on Page  : {mean_answer_on_page:.4f}  "
+          f"({sum(answer_on_page_flags):.0f}/{len(answer_on_page_flags)})")
     print(f"  Answer Recall   : {mean_answer_recall:.4f}  "
           f"({sum(answer_recalls):.0f}/{len(answer_recalls)})")
     print("=" * 72)
@@ -246,6 +262,7 @@ def main() -> int:
                 print(f"       F1   : {r['f1']}   URL: {r['url']}")
                 print(f"       In corpus: {('YES' if r['in_corpus'] == '1' else 'NO')}   "
                       f"URL retrieved: {('YES' if r['url_recall'] == '1' else 'NO')}   "
+                      f"Answer on page: {('YES' if r['answer_on_page'] == '1' else 'NO')}   "
                       f"Answer in chunks: {('YES' if r['answer_recall'] == '1' else 'NO')}")
                 print()
 
@@ -253,7 +270,7 @@ def main() -> int:
     if args.out:
         fieldnames = [
             "idx", "question", "gold", "predicted", "em", "f1",
-            "url", "in_corpus", "url_recall", "answer_recall",
+            "url", "in_corpus", "url_recall", "answer_on_page", "answer_recall",
         ]
         with open(args.out, "w", newline="", encoding="utf-8") as fh:
             writer = csv.DictWriter(fh, fieldnames=fieldnames)
