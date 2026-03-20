@@ -72,5 +72,6 @@ def call_llm(
             return data["choices"][0]["message"]["content"].strip()
         except (KeyError, IndexError, TypeError):
             raise RuntimeError(f"OpenRouter response missing expected content: {data}")
-    breakpoint()
+        except:
+            breakpoint() 
     raise RuntimeError(f"OpenRouter response missing choices: {data}")
