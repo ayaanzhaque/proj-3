@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Run the RAG model on a CSV test set and evaluate with EM / token-F1.
+"""Run the RAG model on a CSV or JSONL test set and evaluate with EM / token-F1.
 
 Usage:
     python scripts/evaluate_test_set.py test_set.csv
+    python scripts/evaluate_test_set.py hidden_dev.jsonl
     python scripts/evaluate_test_set.py test_set.csv -v
     python scripts/evaluate_test_set.py test_set.csv --out results.csv
 """
@@ -10,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import statistics
 import sys
 import time
@@ -28,6 +30,35 @@ def load_csv(path: str) -> list[dict[str, str]]:
     """Read a CSV with columns: question, answer, url, labeler."""
     with open(path, newline="", encoding="utf-8") as fh:
         return list(csv.DictReader(fh))
+
+
+def load_jsonl(path: str) -> list[dict[str, str]]:
+    """Read a JSONL file and normalize field names to {question, answer, url}.
+
+    Handles two schemas:
+      - hidden_dev style : {"question", "answer", "url"}
+      - local_dev style  : {"question", "answers", "evidence_url", ...}
+    """
+    rows: list[dict[str, str]] = []
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            obj = json.loads(line)
+            rows.append({
+                "question": obj["question"],
+                "answer": obj.get("answer") or obj.get("answers", ""),
+                "url": obj.get("url") or obj.get("evidence_url", ""),
+            })
+    return rows
+
+
+def load_test_set(path: str) -> list[dict[str, str]]:
+    """Auto-detect CSV vs JSONL by file extension and load accordingly."""
+    if path.endswith(".jsonl"):
+        return load_jsonl(path)
+    return load_csv(path)
 
 
 def normalize_url(url: str) -> str:
@@ -63,9 +94,9 @@ def truncate(text: str, max_len: int = 120) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Evaluate the RAG model on a CSV test set (question,answer,url,labeler)."
+        description="Evaluate the RAG model on a CSV or JSONL test set."
     )
-    parser.add_argument("csv_path", type=str, help="Path to the CSV test set.")
+    parser.add_argument("test_path", type=str, help="Path to the test set (.csv or .jsonl).")
     parser.add_argument(
         "-v", "--verbose", action="store_true",
         help="Show per-question retrieval details (retrieved URLs, top chunks, scores).",
@@ -76,16 +107,16 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    rows = load_csv(args.csv_path)
+    rows = load_test_set(args.test_path)
     if not rows:
-        print("No rows found in CSV.", file=sys.stderr)
+        print("No rows found in test set.", file=sys.stderr)
         return 1
 
     questions = [r["question"] for r in rows]
     gold_answers = [r["answer"].split("|") for r in rows]
     urls = [r.get("url", "") for r in rows]
 
-    print(f"Loaded {len(rows)} questions from {args.csv_path}")
+    print(f"Loaded {len(rows)} questions from {args.test_path}")
     print("Loading RAG model …")
     model = RAGModel()
     runtime = model.runtime
