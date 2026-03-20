@@ -16,6 +16,7 @@ import statistics
 import sys
 import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -135,9 +136,20 @@ def main() -> int:
     all_retrieved = runtime.retrieve_many(questions)
     t_retrieve = time.perf_counter() - t0
 
-    print("Answering …")
+    print("Answering (parallel) …")
     t1 = time.perf_counter()
-    predictions = runtime.answer_many(questions, all_retrieved)
+    n_workers = min(16, len(questions))
+    predictions = ["UNKNOWN"] * len(questions)
+
+    def _answer(idx: int) -> tuple[int, str]:
+        return idx, runtime.answer_many([questions[idx]], [all_retrieved[idx]])[0]
+
+    with ThreadPoolExecutor(max_workers=n_workers) as pool:
+        futures = {pool.submit(_answer, i): i for i in range(len(questions))}
+        for future in as_completed(futures):
+            idx, answer = future.result()
+            predictions[idx] = answer
+
     t_answer = time.perf_counter() - t1
 
     elapsed = t_retrieve + t_answer
