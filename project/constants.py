@@ -13,6 +13,7 @@ MODEL_DIR = ARTIFACT_DIR / "models"
 
 PAGES_PATH = CORPUS_DIR / "pages.jsonl"
 CHUNKS_PATH = CORPUS_DIR / "chunks.jsonl"
+CORPUS_PATH = ROOT_DIR / "eecs_text_bs_rewritten.jsonl"
 DATASET_PATH = QA_DIR / "local_dev.jsonl"
 HOLDOUT_PATH = QA_DIR / "local_holdout.jsonl"
 IAA_SUBSET_PATH = QA_DIR / "iaa_subset.jsonl"
@@ -22,11 +23,9 @@ PAGE_EMBEDDINGS_PATH = ARTIFACT_DIR / "page_embeddings.npy"
 RUNTIME_CONFIG_PATH = ARTIFACT_DIR / "runtime_config.json"
 
 DENSE_ENCODER_NAME = "sentence-transformers/all-MiniLM-L6-v2"
-QA_MODEL_NAME = "deepset/minilm-uncased-squad2"
 DENSE_ENCODER_DIR = MODEL_DIR / "dense_encoder"
-QA_MODEL_DIR = MODEL_DIR / "qa_model"
 
-LLM_MODEL = "qwen/qwen3-8b"
+LLM_MODEL = "meta-llama/llama-3.1-8b-instruct"
 LLM_MAX_TOKENS = 48
 LLM_TEMPERATURE = 0.0
 LLM_TIMEOUT = 20
@@ -115,14 +114,9 @@ DROP_TAGS = {
 CHUNK_WORDS = 130
 CHUNK_OVERLAP = 40
 
-PAGE_TOP_K = 8
-CHUNK_TOP_K = 8
+PAGE_TOP_K = 10
 
-MAX_CONTEXT_LENGTH = 384
-MAX_ANSWER_TOKENS = 16
 MAX_ANSWER_WORDS = 10
-MAX_QA_BATCH = 32
 
 DEFAULT_NULL_MARGIN = 0.0
 DEFAULT_MIN_PAGE_SCORE = 0.04
-DEFAULT_MIN_CHUNK_SCORE = 0.15

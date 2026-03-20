@@ -100,7 +100,7 @@ def main() -> int:
     parser.add_argument("test_path", type=str, help="Path to the test set (.csv or .jsonl).")
     parser.add_argument(
         "-v", "--verbose", action="store_true",
-        help="Show per-question retrieval details (retrieved URLs, top chunks, scores).",
+        help="Show per-question retrieval details (retrieved URLs, top docs, scores).",
     )
     parser.add_argument(
         "--out", type=str, default=None,
@@ -123,12 +123,12 @@ def main() -> int:
     runtime = model.runtime
 
     # Build a set of all URLs in the corpus for coverage checks
-    corpus_urls = {normalize_url(p["url"]) for p in runtime.pages}
+    corpus_urls = {normalize_url(doc["url"]) for doc in runtime.docs}
 
-    # Build URL -> list[chunk] index for "answer on page" checks
-    corpus_chunks_by_url: dict[str, list[dict]] = defaultdict(list)
-    for chunk in runtime.chunks:
-        corpus_chunks_by_url[normalize_url(chunk["url"])].append(chunk)
+    # Build URL -> list[doc] index for "answer on page" checks
+    corpus_docs_by_url: dict[str, list[dict]] = defaultdict(list)
+    for doc in runtime.docs:
+        corpus_docs_by_url[normalize_url(doc["url"])].append(doc)
 
     print("Retrieving …")
     t0 = time.perf_counter()
@@ -156,18 +156,18 @@ def main() -> int:
     in_corpus_flags: list[float] = []
     result_rows: list[dict[str, str]] = []
 
-    for idx, (pred, gold, chunks) in enumerate(
+    for idx, (pred, gold, retrieved) in enumerate(
         zip(predictions, gold_answers, all_retrieved)
     ):
         em = 1.0 if exact_match(pred, gold) else 0.0
         f1 = best_f1(pred, gold)
-        retrieved_urls = list({c["url"] for c in chunks})
+        retrieved_urls = list({c["url"] for c in retrieved})
         u_hit = 1.0 if url_hit(urls[idx], retrieved_urls) else 0.0
-        a_hit = 1.0 if answer_in_chunks(gold, chunks) else 0.0
+        a_hit = 1.0 if answer_in_chunks(gold, retrieved) else 0.0
         gold_norm_url = normalize_url(urls[idx])
         in_corpus = 1.0 if gold_norm_url in corpus_urls else 0.0
-        page_chunks = corpus_chunks_by_url.get(gold_norm_url, [])
-        a_on_page = 1.0 if answer_in_chunks(gold, page_chunks) else 0.0
+        page_docs = corpus_docs_by_url.get(gold_norm_url, [])
+        a_on_page = 1.0 if answer_in_chunks(gold, page_docs) else 0.0
 
         em_scores.append(em)
         f1_scores.append(f1)
@@ -202,18 +202,17 @@ def main() -> int:
             print(f"       In corpus: {'YES' if in_corpus else 'NO'}    "
                   f"URL retrieved: {'YES' if u_hit else 'NO'}    "
                   f"Answer on page: {'YES' if a_on_page else 'NO'}    "
-                  f"Answer in chunks: {'YES' if a_hit else 'NO'}")
-            if chunks:
-                print(f"       Retrieved {len(chunks)} chunks:")
-                for ci, c in enumerate(chunks):
+                  f"Answer in retrieved: {'YES' if a_hit else 'NO'}")
+            if retrieved:
+                print(f"       Retrieved {len(retrieved)} docs:")
+                for ci, c in enumerate(retrieved):
                     print(
                         f"         #{ci + 1}  score={c['retrieval_score']:.3f}  "
                         f"url={c['url']}"
                     )
-                    print(f"              title: {c['title']}")
                     print(f"              text : {truncate(c['text'])}")
             else:
-                print("       (no chunks retrieved)")
+                print("       (no docs retrieved)")
             print()
 
     # --- aggregate metrics ---
@@ -263,7 +262,7 @@ def main() -> int:
                 print(f"       In corpus: {('YES' if r['in_corpus'] == '1' else 'NO')}   "
                       f"URL retrieved: {('YES' if r['url_recall'] == '1' else 'NO')}   "
                       f"Answer on page: {('YES' if r['answer_on_page'] == '1' else 'NO')}   "
-                      f"Answer in chunks: {('YES' if r['answer_recall'] == '1' else 'NO')}")
+                      f"Answer in retrieved: {('YES' if r['answer_recall'] == '1' else 'NO')}")
                 print()
 
     # --- optional CSV output ---

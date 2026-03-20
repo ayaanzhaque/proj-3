@@ -4,7 +4,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from transformers import AutoModel, AutoModelForQuestionAnswering, AutoTokenizer
+from transformers import AutoModel, AutoTokenizer
 
 
 def mean_pool(last_hidden_state: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
@@ -40,14 +40,4 @@ class DenseEncoder:
             pooled = torch.nn.functional.normalize(pooled, p=2, dim=1)
             outputs.append(pooled.cpu().numpy())
         return np.concatenate(outputs, axis=0) if outputs else np.zeros((0, 384), dtype=np.float32)
-
-
-class QAModel:
-    def __init__(self, model_dir: str | Path, device: str = "cpu") -> None:
-        self.device = device
-        self.tokenizer = AutoTokenizer.from_pretrained(str(model_dir), local_files_only=True)
-        self.model = AutoModelForQuestionAnswering.from_pretrained(
-            str(model_dir), local_files_only=True
-        ).to(device)
-        self.model.eval()
 

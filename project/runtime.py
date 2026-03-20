@@ -1,18 +1,16 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-import re
 
 import numpy as np
-import torch
 from rank_bm25 import BM25Okapi
 
 from project.constants import (
     ARTIFACT_DIR,
-    CHUNK_TOP_K,
-    DEFAULT_MIN_CHUNK_SCORE,
+    CORPUS_PATH,
     DEFAULT_MIN_PAGE_SCORE,
     DEFAULT_NULL_MARGIN,
     LLM_MAX_TOKENS,
@@ -28,8 +26,6 @@ from project.constants import (
 from project.io_utils import read_json, read_jsonl
 from project.modeling import DenseEncoder
 from project.text_utils import (
-    lexical_overlap,
-    normalize_answer,
     reciprocal_rank_fusion,
     squash_ws,
     tokenize,
@@ -40,52 +36,50 @@ from project.text_utils import (
 log = logging.getLogger(__name__)
 
 
+def _page_id_from_url(url: str) -> str:
+    return hashlib.md5(url.encode()).hexdigest()[:16]
+
+
 @dataclass
 class RuntimeConfig:
     null_margin: float = DEFAULT_NULL_MARGIN
     min_page_score: float = DEFAULT_MIN_PAGE_SCORE
-    min_chunk_score: float = DEFAULT_MIN_CHUNK_SCORE
     page_top_k: int = PAGE_TOP_K
-    chunk_top_k: int = CHUNK_TOP_K
 
 
 class RetrievalRuntime:
+    """Single-stage page-level retrieval over the rewritten corpus."""
+
     def __init__(self, root: Path | None = None) -> None:
         self.root = root or ARTIFACT_DIR.parent
-        self.pages = read_jsonl(self.root / "data" / "corpus" / "pages.jsonl")
-        self.chunks = read_jsonl(self.root / "data" / "corpus" / "chunks.jsonl")
+        corpus_path = self.root / CORPUS_PATH.name
+        raw_docs = read_jsonl(corpus_path)
+
+        # Filter out empty documents and assign stable page IDs
+        self.docs: list[dict] = []
+        for doc in raw_docs:
+            text = (doc.get("text") or "").strip()
+            if not text:
+                continue
+            doc["page_id"] = _page_id_from_url(doc["url"])
+            self.docs.append(doc)
+
         self.page_embeddings = np.load(self.root / "artifacts" / "page_embeddings.npy")
         runtime_config_path = self.root / "artifacts" / "runtime_config.json"
         raw_config = read_json(runtime_config_path) if runtime_config_path.exists() else {}
+        raw_config.pop("min_chunk_score", None)
         self.config = RuntimeConfig(**raw_config)
-        self.page_lookup = {page["page_id"]: page for page in self.pages}
-        self.chunk_lookup = {chunk["chunk_id"]: chunk for chunk in self.chunks}
-        self.chunk_ids = [chunk["chunk_id"] for chunk in self.chunks]
-        self.chunk_page_ids = np.array([chunk["page_id"] for chunk in self.chunks], dtype=object)
-        self.page_ids = [page["page_id"] for page in self.pages]
 
-        page_corpus = [
-            squash_ws(
-                " ".join(
-                    [
-                        page["title"],
-                        " ".join(page.get("headings", [])),
-                        url_tokens(page["url"]),
-                        page["text"],
-                        " ".join(page.get("table_rows", [])),
-                    ]
-                )
-            )
-            for page in self.pages
-        ]
-        self.page_tokens = [tokenize(text) for text in page_corpus]
-        self.page_bm25 = BM25Okapi(self.page_tokens)
+        self.doc_ids = [doc["page_id"] for doc in self.docs]
+        self.id_to_idx = {doc["page_id"]: i for i, doc in enumerate(self.docs)}
 
-        chunk_corpus = [
-            squash_ws(" ".join([chunk["title"], chunk["heading"], chunk["text"]])) for chunk in self.chunks
+        # BM25 index over page texts (prepend URL tokens for domain signal)
+        doc_corpus = [
+            squash_ws(url_tokens(doc["url"]) + " " + doc["text"])
+            for doc in self.docs
         ]
-        self.chunk_tokens = [tokenize(text) for text in chunk_corpus]
-        self.chunk_bm25 = BM25Okapi(self.chunk_tokens)
+        self.doc_tokens = [tokenize(text) for text in doc_corpus]
+        self.doc_bm25 = BM25Okapi(self.doc_tokens)
 
         self.dense_encoder = DenseEncoder(self.root / "artifacts" / "models" / "dense_encoder")
 
@@ -96,51 +90,45 @@ class RetrievalRuntime:
         question_tokens: list[str],
         query_embedding: np.ndarray,
     ) -> list[dict]:
-        page_scores_sparse = self.page_bm25.get_scores(question_tokens)
-        page_scores_dense = self.page_embeddings @ query_embedding
+        # Sparse (BM25) scores
+        scores_sparse = self.doc_bm25.get_scores(question_tokens)
+        # Dense (embedding) scores
+        scores_dense = self.page_embeddings @ query_embedding
 
+        n_candidates = max(self.config.page_top_k * 4, 20)
         sparse_ranking = [
-            self.page_ids[idx]
-            for idx in np.argsort(page_scores_sparse)[::-1][: max(self.config.page_top_k * 4, 20)]
+            self.doc_ids[idx]
+            for idx in np.argsort(scores_sparse)[::-1][:n_candidates]
         ]
         dense_ranking = [
-            self.page_ids[idx]
-            for idx in np.argsort(page_scores_dense)[::-1][: max(self.config.page_top_k * 4, 20)]
+            self.doc_ids[idx]
+            for idx in np.argsort(scores_dense)[::-1][:n_candidates]
         ]
         fused_scores = reciprocal_rank_fusion([sparse_ranking, dense_ranking])
-        top_pages = [
+
+        top_ids = [
             page_id
-            for page_id, _ in sorted(fused_scores.items(), key=lambda item: item[1], reverse=True)[
-                : self.config.page_top_k
-            ]
+            for page_id, _ in sorted(
+                fused_scores.items(), key=lambda item: item[1], reverse=True
+            )[: self.config.page_top_k]
         ]
-        if not top_pages:
+        if not top_ids:
             return []
 
-        max_sparse = float(np.max(page_scores_sparse)) if len(page_scores_sparse) else 0.0
-        best_page_score = max(fused_scores.values(), default=0.0)
-        if best_page_score < self.config.min_page_score and max_sparse <= 0.0:
+        best_score = max(fused_scores.values(), default=0.0)
+        max_sparse = float(np.max(scores_sparse)) if len(scores_sparse) else 0.0
+        if best_score < self.config.min_page_score and max_sparse <= 0.0:
             return []
 
-        mask = np.isin(self.chunk_page_ids, np.array(top_pages, dtype=object))
-        chunk_scores_sparse = self.chunk_bm25.get_scores(question_tokens)
-        candidate_indices = np.where(mask)[0]
-        scored_chunks: list[tuple[float, int]] = []
-        for idx in candidate_indices:
-            chunk = self.chunks[idx]
-            score = float(chunk_scores_sparse[idx])
-            score += 0.25 * lexical_overlap(question, chunk["heading"])
-            score += 0.15 * lexical_overlap(question, chunk["title"])
-            scored_chunks.append((score, idx))
-        scored_chunks.sort(reverse=True)
-        top_chunks: list[dict] = []
-        for score, idx in scored_chunks[: self.config.chunk_top_k]:
-            if score < self.config.min_chunk_score and top_chunks:
+        results: list[dict] = []
+        for page_id in top_ids:
+            idx = self.id_to_idx.get(page_id)
+            if idx is None:
                 continue
-            chunk = dict(self.chunks[idx])
-            chunk["retrieval_score"] = score
-            top_chunks.append(chunk)
-        return top_chunks
+            doc = dict(self.docs[idx])
+            doc["retrieval_score"] = fused_scores.get(page_id, 0.0)
+            results.append(doc)
+        return results
 
     def retrieve_chunks(self, question: str) -> list[dict]:
         question_tokens = tokenize(question)
@@ -155,7 +143,7 @@ class RetrievalRuntime:
         if not questions:
             return []
         query_embeddings = self.dense_encoder.encode(questions, batch_size=64)
-        question_tokens_list = [tokenize(question) for question in questions]
+        question_tokens_list = [tokenize(q) for q in questions]
         return [
             self._retrieve_for_question(
                 question=question,
@@ -167,20 +155,16 @@ class RetrievalRuntime:
             )
         ]
 
-    def answer_many(self, questions: list[str], retrieved_chunks: list[list[dict]]) -> list[str]:
+    def answer_many(self, questions: list[str], retrieved_docs: list[list[dict]]) -> list[str]:
         from llm import call_llm
 
         answers: list[str] = []
-        for question, chunks in zip(questions, retrieved_chunks):
-            rule_answer = try_rule_based_answer(question, chunks)
-            if rule_answer is not None:
-                answers.append(rule_answer)
-                continue
-            answers.append(self._llm_answer(call_llm, question, chunks))
+        for question, docs in zip(questions, retrieved_docs):
+            answers.append(self._llm_answer(call_llm, question, docs))
         return answers
 
-    def _llm_answer(self, call_llm, question: str, chunks: list[dict]) -> str:
-        context = build_context(chunks, MAX_CONTEXT_CHUNKS, MAX_CONTEXT_CHARS)
+    def _llm_answer(self, call_llm, question: str, docs: list[dict]) -> str:
+        context = build_context(docs, MAX_CONTEXT_CHUNKS, MAX_CONTEXT_CHARS)
         if not context:
             return "UNKNOWN"
 
@@ -201,27 +185,27 @@ class RetrievalRuntime:
         return clean_llm_answer(question, raw)
 
 
-def build_context(chunks: list[dict], max_chunks: int, max_chars: int) -> str:
+def build_context(docs: list[dict], max_docs: int, max_chars: int) -> str:
+    """Build LLM context from retrieved pages, truncating each to fit budget."""
     parts: list[str] = []
     total = 0
-    for chunk in chunks[:max_chunks]:
-        header = chunk.get("title", "")
-        heading = chunk.get("heading", "")
-        text = chunk.get("text", "")
-        snippet = squash_ws(" | ".join(filter(None, [header, heading, text])))
-        if total + len(snippet) > max_chars and parts:
+    for doc in docs[:max_docs]:
+        text = squash_ws(doc.get("text", ""))
+        if total + len(text) > max_chars and parts:
+            remaining = max_chars - total
+            if remaining > 100:
+                parts.append(text[:remaining])
             break
-        parts.append(snippet)
-        total += len(snippet)
+        parts.append(text)
+        total += len(text)
     return "\n\n".join(parts)
 
 
 def clean_llm_answer(question: str, raw: str) -> str:
     answer = raw.strip().strip('"\'').strip()
-    # Remove common LLM preamble patterns
     for prefix in ("Answer:", "The answer is", "Based on the context,", "According to the context,"):
         if answer.lower().startswith(prefix.lower()):
-            answer = answer[len(prefix):].strip().strip(":").strip()
+            answer = answer[len(prefix) :].strip().strip(":").strip()
 
     answer = answer.split("\n")[0].strip()
     answer = truncate_answer_words(answer, MAX_ANSWER_WORDS).strip(" ,;:.")
@@ -229,113 +213,3 @@ def clean_llm_answer(question: str, raw: str) -> str:
     if not answer or answer.upper() == "UNKNOWN":
         return "UNKNOWN"
     return answer
-
-
-def parse_kv_row(text: str) -> dict[str, str]:
-    fields: dict[str, str] = {}
-    for part in text.split("|"):
-        part = squash_ws(part)
-        if ": " in part:
-            key, value = part.split(": ", 1)
-            fields[key.lower()] = value
-    return fields
-
-
-def pipe_parts(text: str) -> list[str]:
-    return [squash_ws(part) for part in text.split("|") if squash_ws(part)]
-
-
-def matches_target(text: str, target: str) -> bool:
-    return normalize_answer(target) in normalize_answer(text)
-
-
-def try_rule_based_answer(question: str, chunks: list[dict]) -> str | None:
-    question_norm = normalize_answer(question)
-    course_title_match = re.match(r"what is the title of (.+)", question_norm)
-    reverse_course_match = re.match(r"which (.+) course is titled (.+)", question_norm)
-    capacity_match = re.match(r"what is the capacity of (.+)", question_norm)
-    grad_match = re.match(r"when is (.+) expected to graduate", question_norm)
-    breadth_match = re.match(r"what is the breadth area of (.+)", question_norm)
-    date_match = re.match(r"when is (.+)", question_norm)
-    happens_match = re.match(r"what happens on (.+) in", question_norm)
-    stat_match = re.match(r"what number is listed for (.+) on the", question_norm)
-    email_match = re.match(r"which email is mentioned for (.+)", question_norm)
-
-    for chunk in chunks:
-        text = chunk["text"]
-        fields = parse_kv_row(text)
-        parts = pipe_parts(text)
-
-        if course_title_match:
-            target = course_title_match.group(1)
-            if fields and fields.get("course number") and (
-                matches_target(fields["course number"], target) or matches_target(target, fields["course number"])
-            ):
-                answer = fields.get("course title") or fields.get("course")
-                if answer:
-                    return answer
-            if len(parts) >= 2 and matches_target(parts[0], target):
-                return parts[1]
-
-        if reverse_course_match:
-            target_title = reverse_course_match.group(2)
-            if fields:
-                answer = fields.get("course number") or fields.get("number")
-                title = fields.get("course title") or fields.get("course")
-                if answer and title and matches_target(title, target_title):
-                    return answer
-            if len(parts) >= 2 and matches_target(parts[1], target_title):
-                return parts[0]
-
-        if capacity_match:
-            target = capacity_match.group(1)
-            if fields.get("room name/number") and matches_target(fields["room name/number"], target):
-                answer = fields.get("cap.")
-                if answer:
-                    return answer
-
-        if grad_match:
-            target = grad_match.group(1)
-            if fields.get("full name") and matches_target(fields["full name"], target):
-                answer = fields.get("semester of graduation")
-                if answer:
-                    return answer
-
-        if breadth_match:
-            target = breadth_match.group(1)
-            if fields.get("full name") and matches_target(fields["full name"], target):
-                answer = fields.get("breadth area")
-                if answer:
-                    return answer
-
-        if date_match and fields.get("proceeding") and fields.get("date"):
-            target = date_match.group(1)
-            if matches_target(fields["proceeding"], target):
-                return fields["date"]
-
-        if happens_match and fields.get("proceeding") and fields.get("date"):
-            target = happens_match.group(1)
-            if matches_target(fields["date"], target):
-                return fields["proceeding"]
-
-        if stat_match and len(parts) == 2:
-            target = stat_match.group(1)
-            if matches_target(parts[0], target):
-                return parts[1]
-
-        if email_match:
-            target = email_match.group(1)
-            if fields.get("room name/number") and matches_target(fields["room name/number"], target):
-                match = re.search(r"([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+)", text)
-                if match:
-                    return match.group(1)
-
-        if "retroactive change in class schedule" in question_norm and fields.get("form(s)"):
-            if "retroactive change in class schedule" in normalize_answer(fields.get("description", "")):
-                return fields["form(s)"]
-
-        if "request to take the qualifying exam" in question_norm and fields.get("form(s)"):
-            if "request to take the qualifying exam" in normalize_answer(fields.get("description", "")):
-                return fields["form(s)"]
-
-    return None
