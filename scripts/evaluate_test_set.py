@@ -189,6 +189,9 @@ def main() -> int:
         page_docs = corpus_docs_by_url.get(gold_norm_url, [])
         a_on_page = 1.0 if answer_in_chunks(gold, page_docs) else 0.0
 
+        if a_on_page and a_hit and pred.strip().upper() == "UNKNOWN":
+            breakpoint()  # answer available on page & in retrieved, but LLM returned UNKNOWN
+
         em_scores.append(em)
         f1_scores.append(f1)
         url_recalls.append(u_hit)
