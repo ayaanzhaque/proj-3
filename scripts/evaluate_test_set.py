@@ -107,6 +107,10 @@ def main() -> int:
         "--out", type=str, default=None,
         help="Optional path to write per-question results CSV.",
     )
+    parser.add_argument(
+        "-j", "--parallel", type=int, default=1, metavar="N",
+        help="Number of parallel threads for LLM calls (default: 1 = sequential).",
+    )
     args = parser.parse_args()
 
     rows = load_test_set(args.test_path)
@@ -136,19 +140,23 @@ def main() -> int:
     all_retrieved = runtime.retrieve_many(questions)
     t_retrieve = time.perf_counter() - t0
 
-    print("Answering (parallel) …")
+    n_workers = args.parallel
+    print(f"Answering ({n_workers} thread{'s' if n_workers > 1 else ''}) …")
     t1 = time.perf_counter()
-    n_workers = min(16, len(questions))
-    predictions = ["UNKNOWN"] * len(questions)
 
-    def _answer(idx: int) -> tuple[int, str]:
-        return idx, runtime.answer_many([questions[idx]], [all_retrieved[idx]])[0]
+    if n_workers <= 1:
+        predictions = runtime.answer_many(questions, all_retrieved)
+    else:
+        predictions = ["UNKNOWN"] * len(questions)
 
-    with ThreadPoolExecutor(max_workers=n_workers) as pool:
-        futures = {pool.submit(_answer, i): i for i in range(len(questions))}
-        for future in as_completed(futures):
-            idx, answer = future.result()
-            predictions[idx] = answer
+        def _answer(idx: int) -> tuple[int, str]:
+            return idx, runtime.answer_many([questions[idx]], [all_retrieved[idx]])[0]
+
+        with ThreadPoolExecutor(max_workers=n_workers) as pool:
+            futures = {pool.submit(_answer, i): i for i in range(len(questions))}
+            for future in as_completed(futures):
+                idx, answer = future.result()
+                predictions[idx] = answer
 
     t_answer = time.perf_counter() - t1
 
