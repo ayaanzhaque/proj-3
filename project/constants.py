@@ -26,21 +26,20 @@ QA_MODEL_NAME = "deepset/minilm-uncased-squad2"
 DENSE_ENCODER_DIR = MODEL_DIR / "dense_encoder"
 QA_MODEL_DIR = MODEL_DIR / "qa_model"
 
-LLM_MODEL = "meta-llama/llama-3.1-8b-instruct"
+LLM_MODEL = "qwen/qwen3-8b"
 LLM_MAX_TOKENS = 48
 LLM_TEMPERATURE = 0.0
 LLM_TIMEOUT = 20
 MAX_CONTEXT_CHUNKS = 5
 MAX_CONTEXT_CHARS = 3000
 
-LLM_SYSTEM_PROMPT = (
-    "You are a concise question-answering assistant. "
-    "Answer the question using ONLY the provided context. "
-    "Give the shortest possible answer — a name, number, date, or short phrase (under 10 words). "
-    "Do NOT repeat the question or add explanation. "
-    "If the answer is a yes/no question, respond with only 'Yes' or 'No'. "
-    "If the answer cannot be found in the context, respond with exactly 'UNKNOWN'."
-)
+LLM_SYSTEM_PROMPT = """You are a concise question-answering assistant.
+Answer the question using ONLY the provided context.
+Give the shortest possible answer — a name, number, date, or short phrase (under 10 words).
+Do NOT repeat the question or add explanation.
+If the answer is a yes/no question, respond with only 'Yes' or 'No'.
+If the answer cannot be found in the context, respond with exactly 'UNKNOWN'.
+Format the time of day like '7:00pm' and expand any day of the week abbreviations, like 'M' should be 'Monday'."""
 
 USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "

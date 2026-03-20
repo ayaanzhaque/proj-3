@@ -28,7 +28,6 @@ from project.constants import (
 from project.io_utils import read_json, read_jsonl
 from project.modeling import DenseEncoder
 from project.text_utils import (
-    is_yes_no_question,
     lexical_overlap,
     normalize_answer,
     reciprocal_rank_fusion,
@@ -183,6 +182,7 @@ class RetrievalRuntime:
     def _llm_answer(self, call_llm, question: str, chunks: list[dict]) -> str:
         context = build_context(chunks, MAX_CONTEXT_CHUNKS, MAX_CONTEXT_CHARS)
         if not context:
+            breakpoint()
             return "UNKNOWN"
 
         query = f"Context:\n{context}\n\nQuestion: {question}\nAnswer:"
@@ -196,6 +196,7 @@ class RetrievalRuntime:
                 timeout=LLM_TIMEOUT,
             )
         except Exception as exc:
+            breakpoint()
             log.warning("LLM call failed for question %r: %s", question, exc)
             return "UNKNOWN"
 
@@ -226,14 +227,6 @@ def clean_llm_answer(question: str, raw: str) -> str:
 
     answer = answer.split("\n")[0].strip()
     answer = truncate_answer_words(answer, MAX_ANSWER_WORDS).strip(" ,;:.")
-
-    if is_yes_no_question(question):
-        lowered = answer.lower()
-        if "yes" in lowered:
-            return "Yes"
-        if "no" in lowered:
-            return "No"
-        return answer or "UNKNOWN"
 
     if not answer or answer.upper() == "UNKNOWN":
         return "UNKNOWN"
