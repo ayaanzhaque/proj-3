@@ -182,7 +182,6 @@ class RetrievalRuntime:
     def _llm_answer(self, call_llm, question: str, chunks: list[dict]) -> str:
         context = build_context(chunks, MAX_CONTEXT_CHUNKS, MAX_CONTEXT_CHARS)
         if not context:
-            breakpoint()
             return "UNKNOWN"
 
         query = f"Context:\n{context}\n\nQuestion: {question}\nAnswer:"
@@ -196,7 +195,6 @@ class RetrievalRuntime:
                 timeout=LLM_TIMEOUT,
             )
         except Exception as exc:
-            breakpoint()
             log.warning("LLM call failed for question %r: %s", question, exc)
             return "UNKNOWN"
 
