@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
-from transformers import AutoModel, AutoTokenizer
+from sentence_transformers import SentenceTransformer
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
@@ -25,14 +25,13 @@ from project.modeling import DenseEncoder
 from project.text_utils import squash_ws, url_tokens
 
 
-def materialize_model(model_name: str, model_dir) -> None:
+def materialize_model(model_name: str, model_dir: Path) -> None:
+    """Download model from HuggingFace Hub and save locally (skip if already present)."""
     if (model_dir / "config.json").exists():
         return
     model_dir.mkdir(parents=True, exist_ok=True)
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    tokenizer.save_pretrained(model_dir)
-    model = AutoModel.from_pretrained(model_name)
-    model.save_pretrained(model_dir)
+    model = SentenceTransformer(model_name)
+    model.save(str(model_dir))
 
 
 def build_embeddings() -> np.ndarray:

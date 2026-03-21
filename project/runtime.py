@@ -20,13 +20,14 @@ from project.constants import (
     LLM_TIMEOUT,
     MAX_ANSWER_WORDS,
     MAX_CONTEXT_CHARS,
-    MAX_CONTEXT_CHUNKS,
     PAGE_TOP_K,
 )
 from project.io_utils import read_json, read_jsonl
 from project.modeling import DenseEncoder
 from project.text_utils import (
+    STOPWORDS,
     reciprocal_rank_fusion,
+    split_into_sections,
     squash_ws,
     tokenize,
     truncate_answer_words,
@@ -45,6 +46,16 @@ class RuntimeConfig:
     null_margin: float = DEFAULT_NULL_MARGIN
     min_page_score: float = DEFAULT_MIN_PAGE_SCORE
     page_top_k: int = PAGE_TOP_K
+
+
+@dataclass
+class AnswerDiag:
+    """Diagnostic info from a single LLM answer call."""
+    answer: str
+    llm_query: str
+    system_prompt: str
+    raw_response: str
+    error: str | None = None
 
 
 class RetrievalRuntime:
@@ -163,8 +174,48 @@ class RetrievalRuntime:
             answers.append(self._llm_answer(call_llm, question, docs))
         return answers
 
+    def answer_one_debug(self, question: str, docs: list[dict]) -> AnswerDiag:
+        """Like _llm_answer but returns full diagnostics for debugging."""
+        from llm import call_llm
+
+        context = build_context(docs, question, MAX_CONTEXT_CHARS)
+        if not context:
+            return AnswerDiag(
+                answer="UNKNOWN",
+                llm_query="",
+                system_prompt=LLM_SYSTEM_PROMPT,
+                raw_response="",
+                error="no context (all retrieved docs were empty)",
+            )
+
+        query = f"Context:\n{context}\n\nQuestion: {question}\nAnswer:"
+        try:
+            raw = call_llm(
+                query=query,
+                system_prompt=LLM_SYSTEM_PROMPT,
+                model=LLM_MODEL,
+                max_tokens=LLM_MAX_TOKENS,
+                temperature=LLM_TEMPERATURE,
+                timeout=LLM_TIMEOUT,
+            )
+        except Exception as exc:
+            return AnswerDiag(
+                answer="UNKNOWN",
+                llm_query=query,
+                system_prompt=LLM_SYSTEM_PROMPT,
+                raw_response="",
+                error=f"{type(exc).__name__}: {exc}",
+            )
+
+        return AnswerDiag(
+            answer=clean_llm_answer(question, raw),
+            llm_query=query,
+            system_prompt=LLM_SYSTEM_PROMPT,
+            raw_response=raw,
+        )
+
     def _llm_answer(self, call_llm, question: str, docs: list[dict]) -> str:
-        context = build_context(docs, MAX_CONTEXT_CHUNKS, MAX_CONTEXT_CHARS)
+        context = build_context(docs, question, MAX_CONTEXT_CHARS)
         if not context:
             return "UNKNOWN"
 
@@ -185,20 +236,76 @@ class RetrievalRuntime:
         return clean_llm_answer(question, raw)
 
 
-def build_context(docs: list[dict], max_docs: int, max_chars: int) -> str:
-    """Build LLM context from retrieved pages, truncating each to fit budget."""
+def _score_section(query_tokens: set[str], section: str) -> float:
+    """Fraction of non-stopword query tokens that appear in the section."""
+    if not query_tokens:
+        return 0.0
+    sec_tokens = set(tokenize(section))
+    return len(query_tokens & sec_tokens) / len(query_tokens)
+
+
+def build_context(docs: list[dict], question: str, max_chars: int) -> str:
+    """Build LLM context by selecting the most query-relevant sections.
+
+    Each retrieved page is split on markdown headers.  Sections are scored by
+    lexical overlap with the question, then greedily packed into the character
+    budget so the LLM sees the most relevant passages across *all* retrieved
+    pages.
+    """
+    query_tokens = set(tokenize(question)) - STOPWORDS
+
+    # Score every section across all pages
+    page_sections: list[list[tuple[float, str]]] = []
+    for doc in docs:
+        text = doc.get("text", "")
+        sections = split_into_sections(text)
+        page_sections.append([
+            (_score_section(query_tokens, sec), sec) for sec in sections
+        ])
+
+    # Reserve part of the budget for the top-ranked page so its full context
+    # is preserved, then fill the rest with the best cross-page sections.
+    top_page_budget = max_chars * 2 // 5
+
+    separator = "\n\n"
+    sep_len = len(separator)
+
+    def _pack(candidates: list[tuple[float, str]], budget: int,
+              parts: list[str], total: int, seen: set[str]) -> int:
+        """Greedily pack highest-scoring sections into parts up to budget."""
+        for _score, section in candidates:
+            if section in seen:
+                continue
+            added_len = len(section) + (sep_len if parts else 0)
+            if total + added_len > budget:
+                remaining = budget - total - (sep_len if parts else 0)
+                if remaining > 100:
+                    parts.append(section[:remaining])
+                    total += remaining + (sep_len if len(parts) > 1 else 0)
+                    seen.add(section[:remaining])
+                break
+            parts.append(section)
+            total += added_len
+            seen.add(section)
+        return total
+
     parts: list[str] = []
+    seen: set[str] = set()
     total = 0
-    for doc in docs[:max_docs]:
-        text = squash_ws(doc.get("text", ""))
-        if total + len(text) > max_chars and parts:
-            remaining = max_chars - total
-            if remaining > 100:
-                parts.append(text[:remaining])
-            break
-        parts.append(text)
-        total += len(text)
-    return "\n\n".join(parts)
+
+    # Pass 1: top-ranked page
+    if page_sections:
+        top_secs = sorted(page_sections[0], key=lambda t: t[0], reverse=True)
+        total = _pack(top_secs, top_page_budget, parts, total, seen)
+
+    # Pass 2: best remaining sections from all pages
+    all_secs = sorted(
+        [item for page in page_sections for item in page],
+        key=lambda t: t[0], reverse=True,
+    )
+    total = _pack(all_secs, max_chars, parts, total, seen)
+
+    return separator.join(parts)
 
 
 def clean_llm_answer(question: str, raw: str) -> str:

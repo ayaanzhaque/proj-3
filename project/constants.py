@@ -30,7 +30,7 @@ LLM_MAX_TOKENS = 48
 LLM_TEMPERATURE = 0.0
 LLM_TIMEOUT = 20
 MAX_CONTEXT_CHUNKS = 5
-MAX_CONTEXT_CHARS = 3000
+MAX_CONTEXT_CHARS = 12000
 
 LLM_SYSTEM_PROMPT = """You are a concise question-answering assistant.
 Answer the question using ONLY the provided context.

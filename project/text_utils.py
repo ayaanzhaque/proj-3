@@ -3,6 +3,7 @@ from __future__ import annotations
 import html
 import re
 import string
+import unicodedata
 from collections import Counter
 from typing import Iterable
 
@@ -11,13 +12,33 @@ _PUNCT_TABLE = str.maketrans("", "", string.punctuation)
 _WS_RE = re.compile(r"\s+")
 _TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@/&+-]*")
 
+STOPWORDS = frozenset({
+    "a", "an", "the", "and", "or", "but", "in", "on", "at", "to", "for",
+    "of", "with", "by", "from", "is", "it", "as", "be", "was", "were",
+    "are", "been", "being", "have", "has", "had", "do", "does", "did",
+    "will", "would", "could", "should", "may", "might", "shall", "can",
+    "not", "no", "nor", "so", "if", "then", "than", "that", "this",
+    "these", "those", "which", "who", "whom", "whose", "what", "where",
+    "when", "how", "why", "all", "each", "every", "both", "few", "more",
+    "most", "some", "any", "such", "only", "same", "other", "into",
+    "through", "about", "above", "below", "between", "under", "over",
+    "after", "before", "during", "up", "down", "out", "off", "he", "she",
+    "they", "we", "you", "i", "me", "him", "her", "us", "them", "my",
+    "your", "his", "its", "our", "their", "one", "also", "just", "very",
+})
+
+
+def strip_diacritics(text: str) -> str:
+    """Fold accented/special Unicode chars to ASCII equivalents (ö→o, é→e, etc.)."""
+    return unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
+
 
 def squash_ws(text: str) -> str:
     return _WS_RE.sub(" ", html.unescape(text or "")).strip()
 
 
 def tokenize(text: str) -> list[str]:
-    return [token.lower() for token in _TOKEN_RE.findall(text or "")]
+    return [token.lower() for token in _TOKEN_RE.findall(strip_diacritics(text or ""))]
 
 
 def normalize_answer(text: str) -> str:
@@ -87,4 +108,81 @@ def url_tokens(url: str) -> str:
     cleaned = url.replace("https://", " ").replace("http://", " ")
     cleaned = cleaned.replace("/", " ").replace("-", " ").replace("_", " ").replace(".", " ")
     return squash_ws(cleaned)
+
+
+_HEADER_RE = re.compile(r"^#{1,6}\s", re.MULTILINE)
+_MIN_SECTION_CHARS = 80
+_MAX_SECTION_CHARS = 800
+
+
+def _merge_short(pieces: list[str], sep: str = "\n") -> list[str]:
+    """Merge consecutive short pieces so every result >= _MIN_SECTION_CHARS."""
+    merged: list[str] = []
+    carry = ""
+    for piece in pieces:
+        combined = (carry + sep + piece).strip() if carry else piece
+        if len(combined) < _MIN_SECTION_CHARS:
+            carry = combined
+        else:
+            merged.append(combined)
+            carry = ""
+    if carry:
+        if merged:
+            merged[-1] = merged[-1] + sep + carry
+        else:
+            merged.append(carry)
+    return merged
+
+
+def _split_long_section(text: str) -> list[str]:
+    """Break an oversized section on paragraph / newline boundaries.
+
+    Tries double-newline splits first; falls back to single-newline if the
+    section has no double-newlines.
+    """
+    parts = [p.strip() for p in re.split(r"\n{2,}", text) if p.strip()]
+    if len(parts) <= 1:
+        parts = [p.strip() for p in text.split("\n") if p.strip()]
+    if len(parts) <= 1:
+        return [text]
+    return _merge_short(parts)
+
+
+def split_into_sections(text: str) -> list[str]:
+    """Split page text on markdown headers into sections.
+
+    Very short sections (<80 chars) are merged with neighbors.  Oversized
+    sections (>800 chars) are further split on paragraph boundaries so the
+    scorer can select the most relevant passages.  Pages with no headers
+    are split by paragraphs directly.
+    """
+    splits = _HEADER_RE.split(text)
+    if len(splits) <= 1:
+        stripped = text.strip()
+        if not stripped:
+            return []
+        if len(stripped) > _MAX_SECTION_CHARS:
+            return _split_long_section(stripped)
+        return [stripped]
+
+    # re.split drops the matched header markers; recover them so each section
+    # keeps its heading line for context.
+    headers = _HEADER_RE.findall(text)
+    sections: list[str] = []
+    if splits[0].strip():
+        sections.append(splits[0].strip())
+    for hdr, body in zip(headers, splits[1:]):
+        sections.append((hdr + body).strip())
+
+    merged = _merge_short(sections)
+
+    # Break up oversized sections on paragraph / newline boundaries
+    result: list[str] = []
+    for sec in merged:
+        if len(sec) > _MAX_SECTION_CHARS:
+            result.extend(_split_long_section(sec))
+        else:
+            result.append(sec)
+
+    return result
 

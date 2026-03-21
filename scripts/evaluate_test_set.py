@@ -111,6 +111,10 @@ def main() -> int:
         "-j", "--parallel", type=int, default=1, metavar="N",
         help="Number of parallel threads for LLM calls (default: 1 = sequential).",
     )
+    parser.add_argument(
+        "--debug", action="store_true",
+        help="Break into debugger on any incorrect answer with full LLM diagnostics.",
+    )
     args = parser.parse_args()
 
     rows = load_test_set(args.test_path)
@@ -141,10 +145,22 @@ def main() -> int:
     t_retrieve = time.perf_counter() - t0
 
     n_workers = args.parallel
+    use_debug = args.debug
     print(f"Answering ({n_workers} thread{'s' if n_workers > 1 else ''}) …")
     t1 = time.perf_counter()
 
-    if n_workers <= 1:
+    # When --debug is on, collect per-question diagnostics from the LLM
+    diags: list = [None] * len(questions)
+
+    if use_debug:
+        from project.runtime import AnswerDiag
+
+        predictions = []
+        for i, (q, docs) in enumerate(zip(questions, all_retrieved)):
+            diag = runtime.answer_one_debug(q, docs)
+            diags[i] = diag
+            predictions.append(diag.answer)
+    elif n_workers <= 1:
         predictions = runtime.answer_many(questions, all_retrieved)
     else:
         predictions = ["UNKNOWN"] * len(questions)
@@ -189,8 +205,25 @@ def main() -> int:
         page_docs = corpus_docs_by_url.get(gold_norm_url, [])
         a_on_page = 1.0 if answer_in_chunks(gold, page_docs) else 0.0
 
-        if a_on_page and a_hit and pred.strip().upper() == "UNKNOWN":
-            breakpoint()  # answer available on page & in retrieved, but LLM returned UNKNOWN
+        if use_debug and not em:
+            diag = diags[idx]
+            print("=" * 72)
+            print(f"DEBUG [{idx + 1}]  INCORRECT ANSWER")
+            print(f"  Question     : {questions[idx]}")
+            print(f"  Gold         : {' | '.join(gold)}")
+            print(f"  Predicted    : {pred}")
+            print(f"  F1           : {f1:.4f}")
+            print(f"  URL recalled : {'YES' if u_hit else 'NO'}    "
+                  f"Answer in retrieved: {'YES' if a_hit else 'NO'}    "
+                  f"Answer on page: {'YES' if a_on_page else 'NO'}")
+            if diag:
+                if diag.error:
+                    print(f"  LLM ERROR    : {diag.error}")
+                if diag.raw_response:
+                    print(f"  Raw response : {diag.raw_response!r}")
+                print(f"\n  --- LLM QUERY ---\n{diag.llm_query}\n  --- END QUERY ---")
+            print("=" * 72)
+            breakpoint()
 
         em_scores.append(em)
         f1_scores.append(f1)
