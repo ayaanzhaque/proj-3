@@ -243,6 +243,7 @@ def main() -> int:
     parser.add_argument("--depth", type=int, default=3, help="Max link-follow depth for the spider.")
     parser.add_argument("--max-urls", type=int, default=6000, help="Max URLs to discover.")
     parser.add_argument("--limit", type=int, default=0, help="Limit number of URLs to crawl (0 = no limit).")
+    parser.add_argument("--save-path", type=str, required=True, help="Save path of corpus")
     args = parser.parse_args()
 
     session = build_session()
@@ -255,8 +256,8 @@ def main() -> int:
 
     pages = crawl_pages(url_rows, workers=args.workers)
     print(f"Built {len(pages)} pages", flush=True)
-    write_jsonl(CORPUS_PATH, pages)
-    print(f"Wrote corpus to {CORPUS_PATH}", flush=True)
+    write_jsonl(args.save_path, pages)
+    print(f"Wrote corpus to {args.save_path}", flush=True)
     return 0
 
 
