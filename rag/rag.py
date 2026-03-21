@@ -34,6 +34,7 @@ from rag.text_utils import (
     truncate_answer_words,
     url_tokens,
 )
+from llm import call_llm
 
 log = logging.getLogger(__name__)
 
@@ -170,8 +171,6 @@ class RAGModel:
         ]
 
     def answer_many(self, questions: list[str], retrieved_docs: list[list[dict]]) -> list[str]:
-        from rag.llm import call_llm
-
         answers: list[str] = []
         for question, docs in zip(questions, retrieved_docs):
             answers.append(self._llm_answer(call_llm, question, docs))
@@ -179,8 +178,6 @@ class RAGModel:
 
     def answer_one_debug(self, question: str, docs: list[dict]) -> AnswerDiag:
         """Like _llm_answer but returns full diagnostics for debugging."""
-        from rag.llm import call_llm
-
         context = build_context(docs, question, MAX_CONTEXT_CHARS)
         if not context:
             return AnswerDiag(

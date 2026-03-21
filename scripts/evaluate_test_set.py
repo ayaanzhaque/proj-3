@@ -151,8 +151,6 @@ def main() -> int:
     diags: list = [None] * len(questions)
 
     if use_debug:
-        from rag.rag import AnswerDiag
-
         predictions = []
         for i, (q, docs) in enumerate(zip(questions, all_retrieved)):
             diag = model.answer_one_debug(q, docs)
