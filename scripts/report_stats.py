@@ -2,16 +2,11 @@
 from __future__ import annotations
 
 import statistics
-import sys
 from collections import Counter
 from pathlib import Path
 
-ROOT_DIR = Path(__file__).resolve().parents[1]
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
-
-from project.constants import DATASET_PATH, HOLDOUT_PATH, IAA_TEMPLATE_PATH, PAGES_PATH, REPORT_GENERATED_DIR
-from project.io_utils import read_jsonl, write_json
+from rag.constants import DATASET_PATH, HOLDOUT_PATH, IAA_TEMPLATE_PATH, PAGES_PATH, REPORT_GENERATED_DIR
+from rag.io_utils import read_jsonl, write_json
 
 
 def main() -> int:

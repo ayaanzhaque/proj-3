@@ -5,17 +5,12 @@ import argparse
 import hashlib
 import random
 import re
-import sys
 from pathlib import Path
 
-ROOT_DIR = Path(__file__).resolve().parents[1]
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
-
-from project.constants import DATASET_PATH, HOLDOUT_PATH, IAA_SUBSET_PATH, IAA_TEMPLATE_PATH, PAGES_PATH
-from project.io_utils import read_jsonl, write_jsonl
-from project.schema import QAExample
-from project.text_utils import squash_ws
+from rag.constants import DATASET_PATH, HOLDOUT_PATH, IAA_SUBSET_PATH, IAA_TEMPLATE_PATH, PAGES_PATH
+from rag.io_utils import read_jsonl, write_jsonl
+from rag.schema import QAExample
+from rag.text_utils import squash_ws
 
 
 def parse_kv_row(row: str) -> dict[str, str]:
@@ -362,7 +357,7 @@ def main() -> int:
 
     pages = read_jsonl(PAGES_PATH)
     if not pages:
-        raise SystemExit("Corpus not found or empty. Run scripts/build_corpus.py first.")
+        raise SystemExit("Corpus not found or empty. Run rag/corpus/build_corpus.py first.")
     generated_examples = deduplicate(generate_from_tables(pages))
     curated_examples = [make_example(**row) for row in CURATED_EXAMPLES]
     generated_examples = [

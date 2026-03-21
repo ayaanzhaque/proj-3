@@ -12,7 +12,6 @@ ARTIFACT_DIR = ROOT_DIR / "artifacts"
 MODEL_DIR = ARTIFACT_DIR / "models"
 
 PAGES_PATH = CORPUS_DIR / "pages.jsonl"
-CHUNKS_PATH = CORPUS_DIR / "chunks.jsonl"
 CORPUS_PATH = ROOT_DIR / "eecs_text_bs_rewritten.jsonl"
 DATASET_PATH = QA_DIR / "local_dev.jsonl"
 HOLDOUT_PATH = QA_DIR / "local_holdout.jsonl"
@@ -45,17 +44,6 @@ USER_AGENT = (
     "(KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
 )
 MAIN_DOMAIN = "eecs.berkeley.edu"
-LEGACY_DOMAIN = "www2.eecs.berkeley.edu"
-ALLOWED_DOMAINS = {MAIN_DOMAIN, LEGACY_DOMAIN}
-
-WORDPRESS_TYPES = [
-    "pages",
-    "posts",
-    "news_post",
-    "media_mention",
-    "book",
-    "wall_display",
-]
 
 WWW2_SEEDS = [
     "https://www2.eecs.berkeley.edu/Directories/directory-nostudents.html",
@@ -110,9 +98,6 @@ DROP_TAGS = {
     "footer",
     "aside",
 }
-
-CHUNK_WORDS = 130
-CHUNK_OVERLAP = 40
 
 PAGE_TOP_K = 10
 

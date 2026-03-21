@@ -2,17 +2,12 @@
 from __future__ import annotations
 
 import argparse
-import sys
 from pathlib import Path
 
 import numpy as np
 from sentence_transformers import SentenceTransformer
 
-ROOT_DIR = Path(__file__).resolve().parents[1]
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
-
-from project.constants import (
+from rag.constants import (
     ARTIFACT_DIR,
     CORPUS_PATH,
     DENSE_ENCODER_DIR,
@@ -20,9 +15,9 @@ from project.constants import (
     PAGE_EMBEDDINGS_PATH,
     RUNTIME_CONFIG_PATH,
 )
-from project.io_utils import read_jsonl, write_json
-from project.modeling import DenseEncoder
-from project.text_utils import squash_ws, url_tokens
+from rag.io_utils import read_jsonl, write_json
+from rag.modeling import DenseEncoder
+from rag.text_utils import squash_ws, url_tokens
 
 
 def materialize_model(model_name: str, model_dir: Path) -> None:

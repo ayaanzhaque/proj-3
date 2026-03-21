@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from project.runtime import RetrievalRuntime
+from rag.runtime import RetrievalRuntime
 
 
 class RAGModel:

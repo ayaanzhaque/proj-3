@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 from rank_bm25 import BM25Okapi
 
-from project.constants import (
+from rag.constants import (
     ARTIFACT_DIR,
     CORPUS_PATH,
     DEFAULT_MIN_PAGE_SCORE,
@@ -22,9 +22,9 @@ from project.constants import (
     MAX_CONTEXT_CHARS,
     PAGE_TOP_K,
 )
-from project.io_utils import read_json, read_jsonl
-from project.modeling import DenseEncoder
-from project.text_utils import (
+from rag.io_utils import read_json, read_jsonl
+from rag.modeling import DenseEncoder
+from rag.text_utils import (
     STOPWORDS,
     reciprocal_rank_fusion,
     split_into_sections,

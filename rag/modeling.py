@@ -8,7 +8,7 @@ from sentence_transformers import SentenceTransformer
 
 class DenseEncoder:
     """Thin wrapper around SentenceTransformer that keeps the same interface
-    used by runtime.py and build_artifacts.py."""
+    used by runtime.py and rag/corpus/build_artifacts.py."""
 
     def __init__(self, model_dir: str | Path, device: str = "cpu") -> None:
         self.model = SentenceTransformer(str(model_dir), device=device)

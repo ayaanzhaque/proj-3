@@ -3,16 +3,11 @@ from __future__ import annotations
 
 import argparse
 import statistics
-import sys
 from pathlib import Path
 
-ROOT_DIR = Path(__file__).resolve().parents[1]
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
-
 from rag import RAGModel
-from project.io_utils import read_jsonl
-from project.text_utils import best_f1, exact_match
+from rag.io_utils import read_jsonl
+from rag.text_utils import best_f1, exact_match
 
 
 def main() -> int:

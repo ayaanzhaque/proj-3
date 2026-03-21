@@ -20,12 +20,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from urllib.parse import urlparse
 
-ROOT_DIR = Path(__file__).resolve().parents[1]
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
-
 from rag import RAGModel
-from project.text_utils import best_f1, exact_match, normalize_answer
+from rag.text_utils import best_f1, exact_match, normalize_answer
 
 
 def load_csv(path: str) -> list[dict[str, str]]:
@@ -153,7 +149,7 @@ def main() -> int:
     diags: list = [None] * len(questions)
 
     if use_debug:
-        from project.runtime import AnswerDiag
+        from rag.runtime import AnswerDiag
 
         predictions = []
         for i, (q, docs) in enumerate(zip(questions, all_retrieved)):
