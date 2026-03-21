@@ -8,21 +8,17 @@ CORPUS_DIR = DATA_DIR / "corpus"
 QA_DIR = DATA_DIR / "qa"
 REPORT_DIR = ROOT_DIR / "reports"
 REPORT_GENERATED_DIR = REPORT_DIR / "generated"
-ARTIFACT_DIR = ROOT_DIR / "artifacts"
-MODEL_DIR = ARTIFACT_DIR / "models"
+SHARED_MODEL_DIR = ROOT_DIR / "artifacts" / "models"
 
 PAGES_PATH = CORPUS_DIR / "pages.jsonl"
-CORPUS_PATH = ROOT_DIR / "eecs_text_bs_rewritten.jsonl"
+CORPUS_PATH = ROOT_DIR / "rag" / "corpus" / "official" / "corpus.jsonl"
 DATASET_PATH = QA_DIR / "local_dev.jsonl"
 HOLDOUT_PATH = QA_DIR / "local_holdout.jsonl"
 IAA_SUBSET_PATH = QA_DIR / "iaa_subset.jsonl"
 IAA_TEMPLATE_PATH = QA_DIR / "iaa_subset_template.jsonl"
 
-PAGE_EMBEDDINGS_PATH = ARTIFACT_DIR / "page_embeddings.npy"
-RUNTIME_CONFIG_PATH = ARTIFACT_DIR / "runtime_config.json"
-
 DENSE_ENCODER_NAME = "sentence-transformers/all-MiniLM-L6-v2"
-DENSE_ENCODER_DIR = MODEL_DIR / "dense_encoder"
+DENSE_ENCODER_DIR = SHARED_MODEL_DIR / "dense_encoder"
 
 LLM_MODEL = "meta-llama/llama-3.1-8b-instruct"
 LLM_MAX_TOKENS = 48
@@ -100,6 +96,7 @@ DROP_TAGS = {
 }
 
 PAGE_TOP_K = 10
+RRF_CANDIDATES = 40
 
 MAX_ANSWER_WORDS = 10
 

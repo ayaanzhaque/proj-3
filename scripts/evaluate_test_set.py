@@ -111,6 +111,10 @@ def main() -> int:
         "--debug", action="store_true",
         help="Break into debugger on any incorrect answer with full LLM diagnostics.",
     )
+    parser.add_argument(
+        "--corpus", type=str, default=None,
+        help="Path to a corpus JSONL file (default: rag/corpus/official/corpus.jsonl).",
+    )
     args = parser.parse_args()
 
     rows = load_test_set(args.test_path)
@@ -124,20 +128,18 @@ def main() -> int:
 
     print(f"Loaded {len(rows)} questions from {args.test_path}")
     print("Loading RAG model …")
-    model = RAGModel()
-    runtime = model.runtime
-
+    model = RAGModel(corpus_path=args.corpus)
     # Build a set of all URLs in the corpus for coverage checks
-    corpus_urls = {normalize_url(doc["url"]) for doc in runtime.docs}
+    corpus_urls = {normalize_url(doc["url"]) for doc in model.docs}
 
     # Build URL -> list[doc] index for "answer on page" checks
     corpus_docs_by_url: dict[str, list[dict]] = defaultdict(list)
-    for doc in runtime.docs:
+    for doc in model.docs:
         corpus_docs_by_url[normalize_url(doc["url"])].append(doc)
 
     print("Retrieving …")
     t0 = time.perf_counter()
-    all_retrieved = runtime.retrieve_many(questions)
+    all_retrieved = model.retrieve_many(questions)
     t_retrieve = time.perf_counter() - t0
 
     n_workers = args.parallel
@@ -149,20 +151,20 @@ def main() -> int:
     diags: list = [None] * len(questions)
 
     if use_debug:
-        from rag.runtime import AnswerDiag
+        from rag.rag import AnswerDiag
 
         predictions = []
         for i, (q, docs) in enumerate(zip(questions, all_retrieved)):
-            diag = runtime.answer_one_debug(q, docs)
+            diag = model.answer_one_debug(q, docs)
             diags[i] = diag
             predictions.append(diag.answer)
     elif n_workers <= 1:
-        predictions = runtime.answer_many(questions, all_retrieved)
+        predictions = model.answer_many(questions, all_retrieved)
     else:
         predictions = ["UNKNOWN"] * len(questions)
 
         def _answer(idx: int) -> tuple[int, str]:
-            return idx, runtime.answer_many([questions[idx]], [all_retrieved[idx]])[0]
+            return idx, model.answer_many([questions[idx]], [all_retrieved[idx]])[0]
 
         with ThreadPoolExecutor(max_workers=n_workers) as pool:
             futures = {pool.submit(_answer, i): i for i in range(len(questions))}

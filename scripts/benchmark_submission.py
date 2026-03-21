@@ -11,11 +11,15 @@ from rag import RAGModel
 def main() -> int:
     parser = argparse.ArgumentParser(description="Benchmark submission latency.")
     parser.add_argument("questions_path", type=str)
+    parser.add_argument(
+        "--corpus", type=str, default=None,
+        help="Path to a corpus JSONL file (default: rag/corpus/official/corpus.jsonl).",
+    )
     args = parser.parse_args()
 
     with open(args.questions_path, "r", encoding="utf-8") as handle:
         questions = [line.strip() for line in handle if line.strip()]
-    model = RAGModel()
+    model = RAGModel(corpus_path=args.corpus)
     start = time.perf_counter()
     answers = model.predict(questions)
     elapsed = time.perf_counter() - start

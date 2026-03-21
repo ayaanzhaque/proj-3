@@ -14,7 +14,6 @@ from tqdm import tqdm
 
 from rag.constants import (
     BLOCK_TAGS,
-    CORPUS_PATH,
     DROP_TAGS,
     MAIN_DOMAIN,
     USER_AGENT,

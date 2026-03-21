@@ -1,5 +1,5 @@
 """RAG package for preprocessing and runtime."""
 
-from rag.base import RAGModel
+from rag.rag import RAGModel
 
 __all__ = ["RAGModel"]

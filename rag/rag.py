@@ -9,10 +9,10 @@ import numpy as np
 from rank_bm25 import BM25Okapi
 
 from rag.constants import (
-    ARTIFACT_DIR,
     CORPUS_PATH,
     DEFAULT_MIN_PAGE_SCORE,
     DEFAULT_NULL_MARGIN,
+    DENSE_ENCODER_DIR,
     LLM_MAX_TOKENS,
     LLM_MODEL,
     LLM_SYSTEM_PROMPT,
@@ -21,9 +21,10 @@ from rag.constants import (
     MAX_ANSWER_WORDS,
     MAX_CONTEXT_CHARS,
     PAGE_TOP_K,
+    RRF_CANDIDATES,
 )
-from rag.io_utils import read_json, read_jsonl
-from rag.modeling import DenseEncoder
+from rag.io_utils import read_jsonl
+from rag.encoder import DenseEncoder
 from rag.text_utils import (
     STOPWORDS,
     reciprocal_rank_fusion,
@@ -58,12 +59,11 @@ class AnswerDiag:
     error: str | None = None
 
 
-class RetrievalRuntime:
+class RAGModel:
     """Single-stage page-level retrieval over the rewritten corpus."""
 
-    def __init__(self, root: Path | None = None) -> None:
-        self.root = root or ARTIFACT_DIR.parent
-        corpus_path = self.root / CORPUS_PATH.name
+    def __init__(self, corpus_path: Path | str | None = None) -> None:
+        corpus_path = Path(corpus_path) if corpus_path else CORPUS_PATH
         raw_docs = read_jsonl(corpus_path)
 
         # Filter out empty documents and assign stable page IDs
@@ -75,11 +75,9 @@ class RetrievalRuntime:
             doc["page_id"] = _page_id_from_url(doc["url"])
             self.docs.append(doc)
 
-        self.page_embeddings = np.load(self.root / "artifacts" / "page_embeddings.npy")
-        runtime_config_path = self.root / "artifacts" / "runtime_config.json"
-        raw_config = read_json(runtime_config_path) if runtime_config_path.exists() else {}
-        raw_config.pop("min_chunk_score", None)
-        self.config = RuntimeConfig(**raw_config)
+        embeddings_path = corpus_path.with_suffix(".npy")
+        self.page_embeddings = np.load(embeddings_path)
+        self.config = RuntimeConfig()
 
         self.doc_ids = [doc["page_id"] for doc in self.docs]
         self.id_to_idx = {doc["page_id"]: i for i, doc in enumerate(self.docs)}
@@ -92,7 +90,7 @@ class RetrievalRuntime:
         self.doc_tokens = [tokenize(text) for text in doc_corpus]
         self.doc_bm25 = BM25Okapi(self.doc_tokens)
 
-        self.dense_encoder = DenseEncoder(self.root / "artifacts" / "models" / "dense_encoder")
+        self.dense_encoder = DenseEncoder(DENSE_ENCODER_DIR)
 
     def _retrieve_for_question(
         self,
@@ -106,14 +104,13 @@ class RetrievalRuntime:
         # Dense (embedding) scores
         scores_dense = self.page_embeddings @ query_embedding
 
-        n_candidates = max(self.config.page_top_k * 4, 20)
         sparse_ranking = [
             self.doc_ids[idx]
-            for idx in np.argsort(scores_sparse)[::-1][:n_candidates]
+            for idx in np.argsort(scores_sparse)[::-1][:RRF_CANDIDATES]
         ]
         dense_ranking = [
             self.doc_ids[idx]
-            for idx in np.argsort(scores_dense)[::-1][:n_candidates]
+            for idx in np.argsort(scores_dense)[::-1][:RRF_CANDIDATES]
         ]
         fused_scores = reciprocal_rank_fusion([sparse_ranking, dense_ranking])
 
@@ -141,6 +138,12 @@ class RetrievalRuntime:
             results.append(doc)
         return results
 
+    def predict(self, questions: list[str]) -> list[str]:
+        if not questions:
+            return []
+        retrieved = self.retrieve_many(questions)
+        return self.answer_many(questions, retrieved)
+
     def retrieve_chunks(self, question: str) -> list[dict]:
         question_tokens = tokenize(question)
         query_embedding = self.dense_encoder.encode([question], batch_size=1)[0]
@@ -167,7 +170,7 @@ class RetrievalRuntime:
         ]
 
     def answer_many(self, questions: list[str], retrieved_docs: list[list[dict]]) -> list[str]:
-        from llm import call_llm
+        from rag.llm import call_llm
 
         answers: list[str] = []
         for question, docs in zip(questions, retrieved_docs):
@@ -176,7 +179,7 @@ class RetrievalRuntime:
 
     def answer_one_debug(self, question: str, docs: list[dict]) -> AnswerDiag:
         """Like _llm_answer but returns full diagnostics for debugging."""
-        from llm import call_llm
+        from rag.llm import call_llm
 
         context = build_context(docs, question, MAX_CONTEXT_CHARS)
         if not context:

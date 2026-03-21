@@ -13,13 +13,17 @@ from rag.text_utils import best_f1, exact_match
 def main() -> int:
     parser = argparse.ArgumentParser(description="Evaluate the local dataset with the RAG model.")
     parser.add_argument("dataset_path", type=str)
+    parser.add_argument(
+        "--corpus", type=str, default=None,
+        help="Path to a corpus JSONL file (default: rag/corpus/official/corpus.jsonl).",
+    )
     args = parser.parse_args()
 
     rows = read_jsonl(args.dataset_path)
     questions = [row["question"] for row in rows]
     answers = [row["answers"].split("|") for row in rows]
     urls = [row["evidence_url"] for row in rows]
-    model = RAGModel()
+    model = RAGModel(corpus_path=args.corpus)
     predictions = model.predict(questions)
 
     em_scores = [1.0 if exact_match(pred, gold) else 0.0 for pred, gold in zip(predictions, answers)]
